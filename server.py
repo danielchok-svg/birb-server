@@ -1,14 +1,17 @@
 import asyncio
-import websockets
 import json
 import os
+from aiohttp import web
+import websockets
 
-PORT = int(os.environ.get("PORT", 10000))
 connected_clients = set()
 
-async def handler(websocket):
+# -----------------------------
+# WebSocket handler for birb clients
+# -----------------------------
+async def ws_handler(websocket, path):
     connected_clients.add(websocket)
-    print("Client connected")
+    print("Birb client connected")
 
     try:
         async for _ in websocket:
@@ -17,47 +20,75 @@ async def handler(websocket):
         pass
     finally:
         connected_clients.remove(websocket)
-        print("Client disconnected")
+        print("Birb client disconnected")
 
-async def broadcast(message):
+# -----------------------------
+# Broadcast helper
+# -----------------------------
+async def broadcast(message: dict):
     if connected_clients:
-        await asyncio.wait([client.send(message) for client in connected_clients])
+        data = json.dumps(message)
+        await asyncio.wait([client.send(data) for client in connected_clients])
 
-async def command_console():
-    while True:
-        cmd = input("Command: ").strip()
+# -----------------------------
+# HTTP API endpoints
+# -----------------------------
+async def spawn(request):
+    amount = int(request.match_info.get("amount", 1))
+    await broadcast({"spawn_birb": amount})
+    return web.Response(text=f"Spawned {amount} birbs")
 
-        if cmd.startswith("spawn"):
-            parts = cmd.split()
-            amount = 1
-            if len(parts) > 1:
-                try:
-                    amount = int(parts[1])
-                except:
-                    pass
-            msg = json.dumps({"spawn_birb": amount})
-            await broadcast(msg)
+async def despawn(request):
+    await broadcast({"despawn_all": True})
+    return web.Response(text="Despawned all birbs")
 
-        elif cmd == "despawn":
-            msg = json.dumps({"despawn_all": True})
-            await broadcast(msg)
+async def pause(request):
+    await broadcast({"pause": True})
+    return web.Response(text="Paused all birbs")
 
-        elif cmd.startswith("chat"):
-            text = cmd[5:]
-            msg = json.dumps({"chat": text})
-            await broadcast(msg)
+async def resume(request):
+    await broadcast({"resume": True})
+    return web.Response(text="Resumed all birbs")
 
-        elif cmd == "pause":
-            msg = json.dumps({"pause": True})
-            await broadcast(msg)
+async def chat(request):
+    msg = request.match_info.get("msg", "")
+    await broadcast({"chat": msg})
+    return web.Response(text=f"Sent chat: {msg}")
 
-        elif cmd == "resume":
-            msg = json.dumps({"resume": True})
-            await broadcast(msg)
+# -----------------------------
+# Create HTTP app
+# -----------------------------
+def create_http_app():
+    app = web.Application()
+    app.router.add_get("/spawn/{amount}", spawn)
+    app.router.add_get("/despawn", despawn)
+    app.router.add_get("/pause", pause)
+    app.router.add_get("/resume", resume)
+    app.router.add_get("/chat/{msg}", chat)
+    return app
 
+# -----------------------------
+# Main entry point
+# -----------------------------
 async def main():
-    print(f"Server running on port {PORT}")
-    server = await websockets.serve(handler, "0.0.0.0", PORT)
-    await command_console()
+    port = int(os.environ.get("PORT", 10000))
 
-asyncio.run(main())
+    # Start WebSocket server
+    ws_server = websockets.serve(ws_handler, "0.0.0.0", port + 1)
+
+    # Start HTTP server
+    http_app = create_http_app()
+    http_runner = web.AppRunner(http_app)
+    await http_runner.setup()
+    http_site = web.TCPSite(http_runner, "0.0.0.0", port)
+
+    print(f"HTTP API running on port {port}")
+    print(f"WebSocket running on port {port+1}")
+
+    await asyncio.gather(
+        ws_server,
+        http_site.start()
+    )
+
+if __name__ == "__main__":
+    asyncio.run(main())
